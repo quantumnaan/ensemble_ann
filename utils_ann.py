@@ -152,3 +152,44 @@ def _calc_weights(
     # normalize weights to mean 1 to keep the loss scale stable
     weights = weights / float(np.mean(weights))
     return weights
+
+
+def safe_cholesky(S: np.ndarray, jitter: float = 1e-12, max_tries: int = 5) -> np.ndarray:
+    """Compute a numerically-stable Cholesky factor for S.
+
+    Tries np.linalg.cholesky(S) first. If that fails, repeatedly adds
+    increasing jitter to the diagonal and retries. If still failing,
+    falls back to an eigendecomposition with clipped eigenvalues and
+    returns the Cholesky of the reconstructed positive-definite matrix.
+
+    Parameters
+    ----------
+    S : np.ndarray
+        Square symmetric matrix to decompose.
+    jitter : float
+        Initial jitter added to the diagonal when Cholesky fails.
+    max_tries : int
+        Number of times to retry increasing jitter before falling back
+        to eigendecomposition.
+
+    Returns
+    -------
+    L : np.ndarray
+        Lower-triangular Cholesky factor such that L @ L.T approximates S.
+    """
+    try:
+        return np.linalg.cholesky(S)
+    except np.linalg.LinAlgError:
+        S_try = S.copy()
+        eps = jitter
+        for _ in range(max_tries):
+            try:
+                S_try = S + eps * np.eye(S.shape[0])
+                return np.linalg.cholesky(S_try)
+            except np.linalg.LinAlgError:
+                eps *= 10.0
+        # fallback to eigh and clip
+        w, V = np.linalg.eigh(S)
+        w_clipped = np.clip(w, a_min=1e-16, a_max=None)
+        S_pos = (V * w_clipped) @ V.T
+        return np.linalg.cholesky(S_pos + 1e-16 * np.eye(S.shape[0]))

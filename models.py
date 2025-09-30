@@ -27,6 +27,8 @@ class MLP(nn.Module):
         # self.net = nn.Sequential(*layers)
         layers = [nn.Linear(in_dim, hidden), nn.Sigmoid()]
         layers.append(nn.Dropout(dropout))
+        layers += [nn.Linear(hidden, hidden), nn.Sigmoid()]
+        layers.append(nn.Dropout(dropout))
         layers.append(nn.Linear(hidden, out_dim))
         self.net = nn.Sequential(*layers)
 

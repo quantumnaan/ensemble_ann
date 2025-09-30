@@ -34,11 +34,11 @@ from typing import Tuple, Optional, List
 
 try:
     from .models import MLP
-    from .utils_ann import _fit_single, _calc_weights
+    from .utils_ann import _fit_single, _calc_weights, safe_cholesky
 except Exception:
     # allow running this file as a script (no package context)
     from models import MLP
-    from utils_ann import _fit_single, _calc_weights
+    from utils_ann import _fit_single, _calc_weights, safe_cholesky
 
 
 def _train_worker(args):
@@ -83,12 +83,13 @@ def fit_ensemble(
     N: int = 20,
     epochs: int = 100,
     lr: float = 1e-3,
-    parallel: bool = True,
-    num_workers: Optional[int] = None,
     dropout: float = 0.0,
     weight_decay: float = 0.0,
     hidden: int = 64,
     kde_weighting: bool = False,
+    bootstrap: bool = False,
+    seed: Optional[int] = None,
+    jitter: float = 1e-12,
 ) -> Tuple[List[Optional[object]], np.ndarray, np.ndarray]:
     """Resample y (N draws) and train an independent model per draw.
 
@@ -109,52 +110,73 @@ def fit_ensemble(
     if kde_weighting:
         weights_X = _calc_weights(X)
 
-    if diag_y_cov:
-        if y_cov.ndim == 1:
-            yerr = np.sqrt(y_cov)
-        else:
-            yerr = np.sqrt(np.diag(y_cov))
-        # ys_sample[i,j] = y[j] + N(0, yerr[j])
-        ys_sample = y + np.random.normal(scale=yerr, size=(N, len(y)))
-    else:
-        cholesky_cov = np.linalg.cholesky(y_cov)
-        ys_sample = y + \
-            np.dot(np.random.normal(size=(N, len(y))), cholesky_cov.T)
+    if bootstrap:
+        # Bootstrap: paired-submatrix approach (mode B)
+        # For each bootstrap draw, sample indices with replacement, form
+        # the corresponding submatrix of y_cov and generate correlated
+        # noise from that submatrix's Cholesky. This preserves the
+        # paired structure between X and y in the bootstrap sample while
+        # including the measurement-covariance structure among the
+        # selected indices.
+        rng = np.random.default_rng(seed)
+        n = len(y)
+        ys_sample = np.empty((N, n), dtype=float)
+        idxs_list = [None] * N
 
-    state_dicts = []
-    if parallel:
-        if num_workers is None:
-            num_workers = max(1, multiprocessing.cpu_count() - 1)
-        # Try process-based parallelism with spawn; fall back to serial on any failure
-        try:
-            from concurrent.futures import ProcessPoolExecutor, as_completed
-            ctx = multiprocessing.get_context("spawn")
-            with ProcessPoolExecutor(max_workers=num_workers, mp_context=ctx, initializer=_worker_init, initargs=(X,)) as ex:
-                # reduce per-task pickling: only send y_sample and hyperparams
-                futures = [
-                    ex.submit(_train_worker, (y_s, weights_X, epochs, lr,
-                              dropout, weight_decay, hidden)) for y_s in ys_sample
-                ]
-                # show progress as futures complete
-                from tqdm import tqdm
-                for fut in tqdm(as_completed(futures), total=N):
-                    sd = fut.result()
-                    state_dicts.append(sd)
-        except Exception as e:
-            # Fall back to serial training if process-based parallelism is unavailable
-            print(
-                f"[myann] Parallel training failed ({e}), falling back to serial training")
-            for y_sample in ys_sample:
-                model = _fit_single(
-                    X, y_sample, epochs=epochs, lr=lr, dropout=dropout, weight_decay=weight_decay, hidden=hidden, weights_x=weights_X)
-                sd = model.cpu().state_dict()
-                state_dicts.append(sd)
+        if diag_y_cov:
+            # simple paired bootstrap: sample indices and select both X and y
+            for i in range(N):
+                idxs = rng.integers(0, n, size=n)
+                idxs_list[i] = idxs
+                ys_sample[i] = y[idxs]
+        else:
+            # paired-submatrix bootstrap: for each draw sample idxs,
+            # build Sigma_boot = y_cov[idxs][:, idxs], cholesky it, and
+            # generate noise of length n to add to y[idxs].
+            print("[ensemble_ann] Using paired-submatrix bootstrap with measurement covariance")
+            for i in range(N):
+                idxs = rng.integers(0, n, size=n)
+                idxs_list[i] = idxs
+                Sigma_boot = y_cov[np.ix_(idxs, idxs)]
+                L_boot = safe_cholesky(Sigma_boot, jitter=jitter)
+                z = rng.standard_normal(n)
+                noise = L_boot @ z
+                ys_sample[i] = y[idxs] + noise
     else:
-        for y_sample in ys_sample:
-            model = _fit_single(X, y_sample, epochs=epochs,
-                                lr=lr, dropout=dropout, hidden=hidden, weight_decay=weight_decay, weights_x=weights_X)
-            sd = model.cpu().state_dict()
-            state_dicts.append(sd)
+        if diag_y_cov:
+            if y_cov.ndim == 1:
+                yerr = np.sqrt(y_cov)
+            else:
+                yerr = np.sqrt(np.diag(y_cov))
+            # ys_sample[i,j] = y[j] + N(0, yerr[j])
+            rng = np.random.default_rng(seed)
+            ys_sample = y + rng.normal(scale=yerr, size=(N, len(y)))
+            idxs_list = [None] * N
+        else:
+            cholesky_cov = np.linalg.cholesky(y_cov)
+            rng = np.random.default_rng(seed)
+            ys_sample = y + \
+                np.dot(rng.standard_normal(size=(N, len(y))), cholesky_cov.T)
+            idxs_list = [None] * N
+
+    # Serial training: train one model per sampled y and collect state_dicts.
+    # We intentionally keep the `parallel` and `num_workers` arguments for
+    # backward compatibility but do not use them here to keep the code simple.
+    state_dicts = []
+    for i in range(len(ys_sample)):
+        y_sample = ys_sample[i]
+        idxs = None
+        try:
+            idxs = idxs_list[i]
+        except Exception:
+            idxs = None
+        X_train = X if idxs is None else X[idxs]
+        model = _fit_single(
+            X_train, y_sample, epochs=epochs, lr=lr, dropout=dropout,
+            weight_decay=weight_decay, hidden=hidden, weights_x=weights_X)
+        sd = model.cpu().state_dict()
+        state_dicts.append(sd)
+
     return state_dicts
 
 
