@@ -13,6 +13,7 @@ def _fit_single(
     weight_decay: float = 0.0,
     hidden: int = 64,
     weights_x: Optional[np.ndarray] = None,
+    out_dim: int = 1,
 ) -> object:
     """Train a single MLP regressor on (X, y) and return the trained model.
 
@@ -61,14 +62,14 @@ def _fit_single(
     if device is None:
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    model = MLP(in_dim=X.shape[1], hidden=hidden, dropout=dropout).to(device)
+    model = MLP(in_dim=X.shape[1], hidden=hidden, dropout=dropout, out_dim=out_dim).to(device)
     optimizer = Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
 
     mse_criterion = nn.MSELoss(reduction='none')
 
     # convert inputs to tensors and move to device for training
     X_t = torch.as_tensor(X, dtype=torch.float32).to(device)
-    y_t = torch.as_tensor(y.reshape(-1, 1), dtype=torch.float32).to(device)
+    y_t = torch.as_tensor(y, dtype=torch.float32).to(device)
     # weights_x is already a tensor (or was converted above); just move to device
     W_t = weights_x.reshape(-1, 1).to(device)
     ds = TensorDataset(X_t, y_t, W_t)

@@ -27,7 +27,6 @@ Compatibility
 """
 
 import time
-import multiprocessing
 from pathlib import Path
 import numpy as np
 from typing import Tuple, Optional, List
@@ -76,9 +75,8 @@ def _worker_init(shared_X):
 
 def fit_ensemble(
     X: np.ndarray,
-    y: np.ndarray,
+    Y: np.ndarray,
     y_cov: np.ndarray,
-    diag_y_cov: bool = True,
     weights_X: Optional[np.ndarray] = None,
     N: int = 20,
     epochs: int = 100,
@@ -87,7 +85,6 @@ def fit_ensemble(
     weight_decay: float = 0.0,
     hidden: int = 64,
     kde_weighting: bool = False,
-    bootstrap: bool = False,
     seed: Optional[int] = None,
     jitter: float = 1e-12,
 ) -> Tuple[List[Optional[object]], np.ndarray, np.ndarray]:
@@ -101,63 +98,38 @@ def fit_ensemble(
     This follows the previous ensemble behavior but additionally returns the
     trained model instances reconstructed from their state_dicts.
     """
+    # shape of Y = (data_size, output_dim)
+    # shape of y_cov = (data_size, output_dim, output_dim): we assume y_cov is block diagonal
     X = np.asarray(X)
-    y = np.asarray(y)
+    Y = np.asarray(Y)
     if X.ndim == 1:
         X = X.reshape(-1, 1)
+    out_dim = 1 if Y.ndim == 1 else Y.shape[1]
 
     weights_X = None
     if kde_weighting:
         weights_X = _calc_weights(X)
 
-    if bootstrap:
-        # Bootstrap: paired-submatrix approach (mode B)
-        # For each bootstrap draw, sample indices with replacement, form
-        # the corresponding submatrix of y_cov and generate correlated
-        # noise from that submatrix's Cholesky. This preserves the
-        # paired structure between X and y in the bootstrap sample while
-        # including the measurement-covariance structure among the
-        # selected indices.
-        rng = np.random.default_rng(seed)
-        n = len(y)
-        ys_sample = np.empty((N, n), dtype=float)
-        idxs_list = [None] * N
-
-        if diag_y_cov:
-            # simple paired bootstrap: sample indices and select both X and y
-            for i in range(N):
-                idxs = rng.integers(0, n, size=n)
-                idxs_list[i] = idxs
-                ys_sample[i] = y[idxs]
-        else:
-            # paired-submatrix bootstrap: for each draw sample idxs,
-            # build Sigma_boot = y_cov[idxs][:, idxs], cholesky it, and
-            # generate noise of length n to add to y[idxs].
-            print("[ensemble_ann] Using paired-submatrix bootstrap with measurement covariance")
-            for i in range(N):
-                idxs = rng.integers(0, n, size=n)
-                idxs_list[i] = idxs
-                Sigma_boot = y_cov[np.ix_(idxs, idxs)]
-                L_boot = safe_cholesky(Sigma_boot, jitter=jitter)
-                z = rng.standard_normal(n)
-                noise = L_boot @ z
-                ys_sample[i] = y[idxs] + noise
-    else:
-        if diag_y_cov:
-            if y_cov.ndim == 1:
-                yerr = np.sqrt(y_cov)
-            else:
-                yerr = np.sqrt(np.diag(y_cov))
-            # ys_sample[i,j] = y[j] + N(0, yerr[j])
-            rng = np.random.default_rng(seed)
-            ys_sample = y + rng.normal(scale=yerr, size=(N, len(y)))
-            idxs_list = [None] * N
-        else:
-            cholesky_cov = np.linalg.cholesky(y_cov)
-            rng = np.random.default_rng(seed)
-            ys_sample = y + \
-                np.dot(rng.standard_normal(size=(N, len(y))), cholesky_cov.T)
-            idxs_list = [None] * N
+    # Bootstrap: paired-submatrix approach (mode B)
+    # For each bootstrap draw, sample indices with replacement, form
+    # the corresponding submatrix of y_cov and generate correlated
+    # noise from that submatrix's Cholesky. This preserves the
+    # paired structure between X and y in the bootstrap sample while
+    # including the measurement-covariance structure among the
+    # selected indices.
+    rng = np.random.default_rng(seed)
+    n = len(y)
+    ys_sample = np.empty((N, n), dtype=float)
+    idxs_list = [None] * N
+    
+    # paired-submatrix bootstrap: for each draw sample idxs,
+    # build Sigma_boot = y_cov[idxs][:, idxs], cholesky it, and
+    # generate noise of length n to add to y[idxs].
+    print("[ensemble_ann] Using paired-submatrix bootstrap with measurement covariance")
+    for i in range(N):
+        idxs = rng.integers(0, n, size=n)
+        idxs_list[i] = idxs
+        ys_sample[i] = np.array([rng.multivariate_normal(y[idx], y_cov[idx]) for idx in idxs])
 
     # Serial training: train one model per sampled y and collect state_dicts.
     # We intentionally keep the `parallel` and `num_workers` arguments for
@@ -173,7 +145,8 @@ def fit_ensemble(
         X_train = X if idxs is None else X[idxs]
         model = _fit_single(
             X_train, y_sample, epochs=epochs, lr=lr, dropout=dropout,
-            weight_decay=weight_decay, hidden=hidden, weights_x=weights_X)
+            weight_decay=weight_decay, hidden=hidden, weights_x=weights_X,
+            out_dim=out_dim)
         sd = model.cpu().state_dict()
         state_dicts.append(sd)
 
@@ -184,6 +157,7 @@ def ensemble_predict(
     state_dicts: List[Optional[object]],
     query_x: np.ndarray,
     hidden: int,
+    out_dim: int
 ) -> Tuple[np.ndarray, np.ndarray]:
     """Given a list of model state_dicts or model instances and a query
     grid, reconstruct the models (if needed) and compute predictive mean
@@ -228,7 +202,7 @@ def ensemble_predict(
             m = entry
         # If a dict-like state_dict was passed, reconstruct a model
         elif isinstance(entry, dict):
-            m = MLP(in_dim=query_x.shape[1], hidden=hidden)
+            m = MLP(in_dim=query_x.shape[1], hidden=hidden, out_dim=out_dim)
             m.load_state_dict(entry)
         else:
             # Unknown entry type; skip
@@ -253,8 +227,8 @@ def ensemble_predict(
 
     arr = _np.vstack(preds)
     mean = arr.mean(axis=0)
-    std = arr.std(axis=0, ddof=0)
-    return mean, std
+    cov = _np.cov(arr, rowvar=False)
+    return mean, cov
 
 
 if __name__ == '__main__':
