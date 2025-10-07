@@ -40,39 +40,6 @@ except Exception:
     from utils_ann import _fit_single, _calc_weights, safe_cholesky
 
 
-def _train_worker(args):
-    # helper for ProcessPoolExecutor: train on numpy inputs and return a
-    # serialized model state_dict. Doing so ensures the parent process does not
-    # need to hold large torch objects and reduces inter-process memory usage.
-    # Worker initializer sets `_SHARED_X` so this worker receives only the
-    # per-task data (y_sample) and hyperparameters.
-    import torch
-    y_sample, weights_x, epochs, lr, dropout, weight_decay, hidden = args
-    X = globals().get("_SHARED_X")
-    model = _fit_single(X, y_sample, epochs=epochs, lr=lr,
-                        dropout=dropout, weight_decay=weight_decay, hidden=hidden, weights_x=weights_x)
-    model.eval()
-    # return state_dict so main process can reconstruct model instances
-    sd = model.cpu().state_dict()
-    return sd
-
-
-def _worker_init(shared_X):
-    # Called once in each worker process. Limits BLAS threads (MKL/OpenMP)
-    # to avoid oversubscription and stores `shared_X` in module globals so
-    # workers do not need to pickle X for every task.
-    try:
-        import os
-        os.environ['OMP_NUM_THREADS'] = '1'
-        os.environ['MKL_NUM_THREADS'] = '1'
-    except Exception:
-        pass
-    import torch
-    torch.set_num_threads(1)
-    # store numpy arrays in globals for worker to access
-    globals()['_SHARED_X'] = shared_X
-
-
 def fit_ensemble(
     X: np.ndarray,
     Y: np.ndarray,

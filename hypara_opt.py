@@ -36,7 +36,8 @@ def cv_mse(
             Xtr, ytr,
             epochs=epochs, lr=lr,
             dropout=dropout, weight_decay=weight_decay, hidden=hidden,
-            weights_x=Wtr
+            weights_x=Wtr,
+            out_dim=y.shape[1] if len(y.shape) > 1 else 1,
         )
         import torch
         import numpy as np
@@ -45,6 +46,7 @@ def cv_mse(
             pred = model(torch.tensor(
                 Xva, dtype=torch.float32)).numpy()
         
+        print(f"yva shape: {yva.shape}, pred shape: {pred.shape}")
         diff = yva - pred
         if Wva is not None:
             mse = float(np.mean((diff**2) * Wva))
