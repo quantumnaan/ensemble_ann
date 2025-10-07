@@ -43,7 +43,7 @@ def cv_mse(
         model.eval()
         with torch.no_grad():
             pred = model(torch.tensor(
-                Xva, dtype=torch.float32)).numpy().ravel()
+                Xva, dtype=torch.float32)).numpy()
         
         diff = yva - pred
         if Wva is not None:
@@ -93,7 +93,7 @@ def optimize_hyperparams(
         # search space
         hidden = trial.suggest_int(
             'hidden', hidden_range[0], hidden_range[1], step=16)
-        dropout = trial.suggest_float('dropout', 0.0, 0.5)
+        dropout = trial.suggest_float('dropout', 0.0, 0.1)
         lr = trial.suggest_float('lr', 1e-4, 5e-2, log=True)
         weight_decay = trial.suggest_float(
             'weight_decay', 1e-8, 1e-2, log=True)

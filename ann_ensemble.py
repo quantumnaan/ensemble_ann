@@ -118,8 +118,8 @@ def fit_ensemble(
     # including the measurement-covariance structure among the
     # selected indices.
     rng = np.random.default_rng(seed)
-    n = len(y)
-    ys_sample = np.empty((N, n), dtype=float)
+    n_data = len(Y)
+    ys_sample = np.empty((N, n_data, out_dim), dtype=float)
     idxs_list = [None] * N
     
     # paired-submatrix bootstrap: for each draw sample idxs,
@@ -127,9 +127,9 @@ def fit_ensemble(
     # generate noise of length n to add to y[idxs].
     print("[ensemble_ann] Using paired-submatrix bootstrap with measurement covariance")
     for i in range(N):
-        idxs = rng.integers(0, n, size=n)
+        idxs = rng.integers(0, n_data, size=n_data)
         idxs_list[i] = idxs
-        ys_sample[i] = np.array([rng.multivariate_normal(y[idx], y_cov[idx]) for idx in idxs])
+        ys_sample[i] = np.array([rng.multivariate_normal(Y[idx], y_cov[idx]) for idx in idxs])
 
     # Serial training: train one model per sampled y and collect state_dicts.
     # We intentionally keep the `parallel` and `num_workers` arguments for
@@ -217,18 +217,14 @@ def ensemble_predict(
         m.eval()
         with torch.no_grad():
             tx = torch.tensor(query_x, dtype=torch.float32)
-            out = m(tx).cpu().numpy().ravel()
+            out = m(tx).cpu().numpy()
         preds.append(out)
 
-    if len(preds) == 0:
-        # no valid models
-        M = query_x.shape[0]
-        return _np.zeros(M), _np.zeros(M)
-
-    arr = _np.vstack(preds)
-    mean = arr.mean(axis=0)
-    cov = _np.cov(arr, rowvar=False)
-    return mean, cov
+    preds = _np.array(preds)  # shape (N, M, 2)
+    mean = _np.mean(preds, axis=0) # shape (M, 2)
+    # calc cov in shape (M, 2, 2)
+    cov = _np.array([_np.cov(preds[:, i, :].T) for i in range(preds.shape[1])])
+    return mean, cov  # shape (M, 2), (M, 2, 2)
 
 
 if __name__ == '__main__':
